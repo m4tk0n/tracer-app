@@ -37,11 +37,161 @@ jobs:
           npx cap add android
           npx cap sync android
 
-      - name: Inject GPS Permissions to AndroidManifest
+      - name: Insert Native Java Background GPS Engine
         run: |
+          # 1. Zapsani vsech potrebnych opravneni do AndroidManifest.xml
           MANIFEST_PATH="android/app/src/main/AndroidManifest.xml"
-          PERMISSIONS='<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n<uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />\n<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n<uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />\n<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />'
+          PERMISSIONS='<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n<uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />\n<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n<uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />\n<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n<uses-permission android:name="android.permission.INTERNET" />'
           sed -i "/<manifest/a $PERMISSIONS" $MANIFEST_PATH
+
+          SERVICE_TAG='<service android:name="cz.wz.tracer.GpsService" android:foregroundServiceType="location" android:enabled="true" android:exported="false" />'
+          sed -i "/<\/application>/i $SERVICE_TAG" $MANIFEST_PATH
+
+          # 2. Vytvoreni slozky pro nativni Java kody
+          mkdir -p android/app/src/main/java/cz/wz/tracer
+
+          # 3. Nativni Java sluzba, ktera bezi na pozadi a sama posila GPS na api_location.php
+          cat << 'EOF' > android/app/src/main/java/cz/wz/tracer/GpsService.java
+          package cz.wz.tracer;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.location.Location;
+          import android.location.LocationListener;
+          import android.location.LocationManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.IBinder;
+          import androidx.core.app.NotificationCompat;
+
+          import java.io.OutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.nio.charset.StandardCharsets;
+
+          public class GpsService extends Service {
+              private static final String CHANNEL_ID = "TracerGpsChannel";
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  createNotificationChannel();
+                  
+                  Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
+                          .setContentTitle("Tracer GPS Sledování")
+                          .setContentText("Aplikace aktivně odesílá polohu na pozadí")
+                          .setSmallIcon(android.R.drawable.ic_menu_compass)
+                          .setPriority(NotificationCompat.PRIORITY_LOW)
+                          .setOngoing(true)
+                          .build();
+
+                  startForeground(1, notification);
+                  startGpsUpdates();
+              }
+
+              private void startGpsUpdates() {
+                  LocationManager locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+                  try {
+                      if (locationManager != null) {
+                          locationManager.requestLocationUpdates(
+                              LocationManager.GPS_PROVIDER,
+                              5000, // Kazdych 55 sekund
+                              0,     // Metry
+                              new LocationListener() {
+                                  @Override
+                                  public void onLocationChanged(Location location) {
+                                      sendLocationToServer(location.getLatitude(), location.getLongitude());
+                                  }
+                                  @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
+                                  @Override public void onProviderEnabled(String provider) {}
+                                  @Override public void onProviderDisabled(String provider) {}
+                              }
+                          );
+                      }
+                  } catch (SecurityException e) {
+                      e.printStackTrace();
+                  }
+              }
+
+              private void sendLocationToServer(final double lat, final double lng) {
+                  new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          try {
+                              // Nativni HTTP POST na vas server
+                              URL url = new URL("https://7x.wz.cz/tracer/api_location.php");
+                              HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                              conn.setRequestMethod("POST");
+                              conn.setRequestProperty("Content-Type", "application/json; utf-8");
+                              conn.setDoOutput(true);
+
+                              // Vezme ulozeny email z nastaveni, pripadne pouzije vychozi
+                              SharedPreferences prefs = getSharedPreferences("CapacitorStorage", MODE_PRIVATE);
+                              String email = prefs.getString("tracer_email", "");
+
+                              String jsonInputString = "{\"email\": \"" + email + "\", \"lat\": " + lat + ", \"lng\": " + lng + "}";
+
+                              try (OutputStream os = conn.getOutputStream()) {
+                                  byte[] input = jsonInputString.getBytes(StandardCharsets.UTF_8);
+                                  os.write(input, 0, input.length);
+                              }
+                              conn.getResponseCode();
+                              conn.disconnect();
+                          } catch (Exception e) {
+                              e.printStackTrace();
+                          }
+                      }
+                  }).start();
+              }
+
+              private void createNotificationChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      NotificationChannel serviceChannel = new NotificationChannel(
+                              CHANNEL_ID,
+                              "Tracer GPS Service",
+                              NotificationManager.IMPORTANCE_LOW
+                      );
+                      NotificationManager manager = getSystemService(NotificationManager.class);
+                      if (manager != null) {
+                          manager.createNotificationChannel(serviceChannel);
+                      }
+                  }
+              }
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+          }
+          EOF
+
+          # 4. Spusteni sluzby ihned po startu aplikace
+          cat << 'EOF' > android/app/src/main/java/cz/wz/tracer/MainActivity.java
+          package cz.wz.tracer;
+
+          import android.content.Intent;
+          import android.os.Build;
+          import android.os.Bundle;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  Intent serviceIntent = new Intent(this, GpsService.class);
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      startForegroundService(serviceIntent);
+                  } else {
+                      startService(serviceIntent);
+                  }
+              }
+          }
+          EOF
 
       - name: Build Android APK
         run: |
@@ -54,4 +204,3 @@ jobs:
         with:
           name: Tracer-GPS-App
           path: android/app/build/outputs/apk/debug/app-debug.apk
-          
