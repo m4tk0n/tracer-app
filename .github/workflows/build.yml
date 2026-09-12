@@ -29,36 +29,105 @@ jobs:
           mkdir -p www
           cat << 'EOF' > www/index.html
           <!DOCTYPE html>
-          <html>
+          <html lang="cs">
           <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <title>Tracer GPS</title>
             <style>
               body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #121212; color: white; text-align: center; }
-              button { border: none; padding: 15px 30px; font-size: 18px; font-weight: bold; border-radius: 8px; margin: 10px; cursor: pointer; }
-              .btn-start { background: #00e676; color: black; }
-              .btn-stop { background: #ff5252; color: white; }
+              .box { background: #1e1e1e; padding: 25px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); width: 85%; max-width: 350px; }
+              h1 { margin-top: 0; font-size: 24px; color: #4caf50; }
+              .status-val { font-weight: bold; margin: 15px 0; font-size: 16px; color: #ffeb3b; }
+              .coords { font-family: monospace; font-size: 13px; color: #aaa; margin-bottom: 20px; word-break: break-all; }
+              button { border: none; padding: 14px 20px; font-size: 16px; font-weight: bold; border-radius: 6px; margin: 6px 0; width: 100%; cursor: pointer; }
+              .btn-start { background: #4caf50; color: white; }
+              .btn-pause { background: #ff9800; color: white; }
+              .btn-stop { background: #f44336; color: white; }
+              button:disabled { opacity: 0.4; cursor: not-allowed; }
             </style>
           </head>
           <body>
-            <h1>Tracer GPS</h1>
-            <p id="status">Aplikace je připravena.</p>
-            <button class="btn-start" onclick="startTracking()">START SLEDOVÁNÍ</button>
-            <button class="btn-stop" onclick="stopTracking()">STOP</button>
+            <div class="box">
+              <h1>Tracer GPS</h1>
+              <div id="status" class="status-val">Přípraveno</div>
+              <div id="coords" class="coords">Lat: - | Lng: -</div>
+
+              <button id="btnStart" class="btn-start" onclick="startTracking()">START</button>
+              <button id="btnPause" class="btn-pause" onclick="togglePause()" disabled>PAUZA</button>
+              <button id="btnStop" class="btn-stop" onclick="stopTracking()" disabled>KONEC</button>
+            </div>
 
             <script>
+              let watchId = null;
+              let isPaused = false;
+
+              function updateUI(statusText, startEn, pauseEn, stopEn, pauseLabel = "PAUZA") {
+                document.getElementById('status').innerText = statusText;
+                document.getElementById('btnStart').disabled = !startEn;
+                document.getElementById('btnPause').disabled = !pauseEn;
+                document.getElementById('btnStop').disabled = !stopEn;
+                document.getElementById('btnPause').innerText = pauseLabel;
+              }
+
               function startTracking() {
-                if (window.AndroidBridge) {
-                  window.AndroidBridge.startTracking();
-                  document.getElementById('status').innerText = "Sledování je aktivní.";
+                if (!navigator.geolocation) {
+                  alert("Geolocation není v tomto zařízení podporována.");
+                  return;
+                }
+
+                isPaused = false;
+                updateUI("Sledování běží...", false, true, true, "PAUZA");
+
+                watchId = navigator.geolocation.watchPosition(
+                  (position) => {
+                    if (isPaused) return;
+
+                    const lat = position.coords.latitude;
+                    const lng = position.coords.longitude;
+
+                    document.getElementById('coords').innerText = `Lat: ${lat.toFixed(5)} | Lng: ${lng.toFixed(5)}`;
+                    sendData(lat, lng);
+                  },
+                  (error) => {
+                    console.error("GPS chyba:", error);
+                    document.getElementById('status').innerText = "Chyba GPS: " + error.message;
+                  },
+                  {
+                    enableHighAccuracy: true,
+                    maximumAge: 0,
+                    timeout: 10000
+                  }
+                );
+              }
+
+              function togglePause() {
+                if (isPaused) {
+                  isPaused = false;
+                  updateUI("Sledování běží...", false, true, true, "PAUZA");
+                } else {
+                  isPaused = true;
+                  updateUI("Pozastaveno", false, true, true, "POKRAČOVAT");
                 }
               }
+
               function stopTracking() {
-                if (window.AndroidBridge) {
-                  window.AndroidBridge.stopTracking();
-                  document.getElementById('status').innerText = "Sledování bylo zastaveno.";
+                if (watchId !== null) {
+                  navigator.geolocation.clearWatch(watchId);
+                  watchId = null;
                 }
+                isPaused = false;
+                document.getElementById('coords').innerText = "Lat: - | Lng: -";
+                updateUI("Zastaveno", true, false, false, "PAUZA");
+              }
+
+              function sendData(lat, lng) {
+                const email = localStorage.getItem('tracer_email') || '';
+                fetch("https://7x.wz.cz/tracer/api_location.php", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ email: email, lat: lat, lng: lng })
+                }).catch(err => console.error("Chyba při odosílaní:", err));
               }
             </script>
           </body>
@@ -68,362 +137,16 @@ jobs:
       - name: Install Dependencies
         run: npm install
 
-      - name: Add Android Platform & Google Play Services
+      - name: Add Android Platform
         run: |
           npx cap add android
           npx cap sync android
-          sed -i '/dependencies {/a \    implementation "com.google.android.gms:play-services-location:21.1.0"' android/app/build.gradle
 
-      - name: Configure Native Engine
+      - name: Configure Location Permission
         run: |
           MANIFEST_PATH="android/app/src/main/AndroidManifest.xml"
-          PERMISSIONS='<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n<uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />\n<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n<uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />\n<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n<uses-permission android:name="android.permission.INTERNET" />\n<uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />'
+          PERMISSIONS='<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />'
           sed -i "/<manifest/a $PERMISSIONS" $MANIFEST_PATH
-
-          SERVICE_TAG='<service android:name="cz.wz.tracer.GpsService" android:foregroundServiceType="location" android:enabled="true" android:exported="false" />'
-          sed -i "/<\/application>/i $SERVICE_TAG" $MANIFEST_PATH
-
-          mkdir -p android/app/src/main/java/cz/wz/tracer
-
-          # Nativní GpsService.java se zaručeným odpojením GPS (zhasnutí tečky)
-          cat << 'EOF' > android/app/src/main/java/cz/wz/tracer/GpsService.java
-          package cz.wz.tracer;
-
-          import android.app.Notification;
-          import android.app.NotificationChannel;
-          import android.app.NotificationManager;
-          import android.app.PendingIntent;
-          import android.app.Service;
-          import android.content.Context;
-          import android.content.Intent;
-          import android.content.SharedPreferences;
-          import android.content.pm.ServiceInfo;
-          import android.hardware.Sensor;
-          import android.hardware.SensorEvent;
-          import android.hardware.SensorEventListener;
-          import android.hardware.SensorManager;
-          import android.location.Location;
-          import android.os.Build;
-          import android.os.IBinder;
-          import android.os.Looper;
-          import androidx.core.app.NotificationCompat;
-
-          import com.google.android.gms.location.FusedLocationProviderClient;
-          import com.google.android.gms.location.LocationCallback;
-          import com.google.android.gms.location.LocationRequest;
-          import com.google.android.gms.location.LocationResult;
-          import com.google.android.gms.location.LocationServices;
-          import com.google.android.gms.location.Priority;
-
-          import java.io.OutputStream;
-          import java.net.HttpURLConnection;
-          import java.net.URL;
-          import java.nio.charset.StandardCharsets;
-
-          public class GpsService extends Service implements SensorEventListener {
-              private static final String CHANNEL_ID = "TracerGpsChannel";
-              public static final String ACTION_START  = "cz.wz.tracer.ACTION_START";
-              public static final String ACTION_PAUSE  = "cz.wz.tracer.ACTION_PAUSE";
-              public static final String ACTION_RESUME = "cz.wz.tracer.ACTION_RESUME";
-              public static final String ACTION_STOP   = "cz.wz.tracer.ACTION_STOP";
-
-              private FusedLocationProviderClient fusedLocationClient;
-              private LocationCallback locationCallback;
-              private SensorManager sensorManager;
-              private Sensor accelerometer;
-              private Sensor gyroscope;
-
-              private boolean isPaused = false;
-              private boolean isGpsActive = false;
-
-              @Override
-              public void onCreate() {
-                  super.onCreate();
-                  fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
-                  initLocationCallback();
-                  initSensors();
-              }
-
-              @Override
-              public int onStartCommand(Intent intent, int flags, int startId) {
-                  String action = intent != null ? intent.getAction() : ACTION_START;
-
-                  if (ACTION_STOP.equals(action)) {
-                      setTrackingState(false);
-                      stopGpsUpdates();
-                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                          stopForeground(STOP_FOREGROUND_REMOVE);
-                      } else {
-                          stopForeground(true);
-                      }
-                      stopSelf();
-                      return START_NOT_STICKY;
-                  } else if (ACTION_PAUSE.equals(action)) {
-                      isPaused = true;
-                      stopGpsUpdates();
-                      updateNotification("Sledování pozastaveno (Pauza)", true);
-                      return START_STICKY;
-                  } else if (ACTION_RESUME.equals(action)) {
-                      isPaused = false;
-                      startGpsUpdates();
-                      updateNotification("Aplikace úsporně sleduje polohu", false);
-                      return START_STICKY;
-                  }
-
-                  setTrackingState(true);
-                  isPaused = false;
-                  createNotificationChannel();
-
-                  try {
-                      Notification notification = buildNotification("Aplikace úsporně sleduje polohu", false);
-                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                          startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
-                      } else {
-                          startForeground(1, notification);
-                      }
-                      startGpsUpdates();
-                  } catch (Exception e) {
-                      e.printStackTrace();
-                  }
-
-                  return START_STICKY;
-              }
-
-              private void setTrackingState(boolean running) {
-                  SharedPreferences prefs = getSharedPreferences("TracerPrefs", MODE_PRIVATE);
-                  prefs.edit().putBoolean("is_tracking_running", running).apply();
-              }
-
-              private void initLocationCallback() {
-                  locationCallback = new LocationCallback() {
-                      @Override
-                      public void onLocationResult(LocationResult locationResult) {
-                          if (locationResult == null || isPaused) return;
-                          for (Location location : locationResult.getLocations()) {
-                              sendLocationToServer(location.getLatitude(), location.getLongitude());
-                          }
-                      }
-                  };
-              }
-
-              private synchronized void startGpsUpdates() {
-                  if (isGpsActive) return;
-
-                  LocationRequest locationRequest = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5000)
-                          .setMinUpdateIntervalMillis(3000)
-                          .setMinUpdateDistanceMeters(5)
-                          .build();
-
-                  try {
-                      fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper());
-                      isGpsActive = true;
-                  } catch (SecurityException e) {
-                      e.printStackTrace();
-                  }
-              }
-
-              private synchronized void stopGpsUpdates() {
-                  if (fusedLocationClient != null && locationCallback != null) {
-                      fusedLocationClient.removeLocationUpdates(locationCallback);
-                  }
-                  isGpsActive = false;
-              }
-
-              private void initSensors() {
-                  sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
-                  if (sensorManager != null) {
-                      accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
-                      gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
-                      if (accelerometer != null) sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_NORMAL);
-                      if (gyroscope != null) sensorManager.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_NORMAL);
-                  }
-              }
-
-              @Override
-              public void onSensorChanged(SensorEvent event) {
-                  if (isPaused) return;
-
-                  if (event.sensor.getType() == Sensor.TYPE_ACCELEROMETER) {
-                      float x = event.values[0], y = event.values[1], z = event.values[2];
-                      double acceleration = Math.sqrt(x * x + y * y + z * z);
-                      if (Math.abs(acceleration - SensorManager.GRAVITY_EARTH) > 0.8) {
-                          onDeviceMoved();
-                      }
-                  } else if (event.sensor.getType() == Sensor.TYPE_GYROSCOPE) {
-                      if (Math.abs(event.values[0]) > 0.2 || Math.abs(event.values[1]) > 0.2 || Math.abs(event.values[2]) > 0.2) {
-                          onDeviceMoved();
-                      }
-                  }
-              }
-
-              private void onDeviceMoved() {
-                  if (!isGpsActive && !isPaused) {
-                      startGpsUpdates();
-                      updateNotification("Aplikace úsporně sleduje polohu", false);
-                  }
-              }
-
-              private void sendLocationToServer(final double lat, final double lng) {
-                  new Thread(() -> {
-                      try {
-                          URL url = new URL("https://7x.wz.cz/tracer/api_location.php");
-                          HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                          conn.setRequestMethod("POST");
-                          conn.setRequestProperty("Content-Type", "application/json; utf-8");
-                          conn.setDoOutput(true);
-
-                          SharedPreferences prefs = getSharedPreferences("CapacitorStorage", MODE_PRIVATE);
-                          String email = prefs.getString("tracer_email", "");
-
-                          String jsonInputString = "{\"email\": \"" + email + "\", \"lat\": " + lat + ", \"lng\": " + lng + "}";
-
-                          try (OutputStream os = conn.getOutputStream()) {
-                              byte[] input = jsonInputString.getBytes(StandardCharsets.UTF_8);
-                              os.write(input, 0, input.length);
-                          }
-                          conn.getResponseCode();
-                          conn.disconnect();
-                      } catch (Exception e) {
-                          e.printStackTrace();
-                      }
-                  }).start();
-              }
-
-              private PendingIntent getServicePendingIntent(String action) {
-                  Intent intent = new Intent(this, GpsService.class);
-                  intent.setAction(action);
-                  return PendingIntent.getService(this, action.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-              }
-
-              private Notification buildNotification(String statusText, boolean paused) {
-                  NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
-                          .setContentTitle("Tracer GPS Sledování")
-                          .setContentText(statusText)
-                          .setSmallIcon(android.R.drawable.ic_menu_compass)
-                          .setPriority(NotificationCompat.PRIORITY_LOW)
-                          .setOngoing(true);
-
-                  if (paused) {
-                      builder.addAction(android.R.drawable.ic_media_play, "POKRAČOVAT", getServicePendingIntent(ACTION_RESUME));
-                  } else {
-                      builder.addAction(android.R.drawable.ic_media_pause, "PAUZA", getServicePendingIntent(ACTION_PAUSE));
-                  }
-
-                  builder.addAction(android.R.drawable.ic_delete, "STOP", getServicePendingIntent(ACTION_STOP));
-
-                  return builder.build();
-              }
-
-              private void updateNotification(String statusText, boolean paused) {
-                  NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-                  if (manager != null) {
-                      manager.notify(1, buildNotification(statusText, paused));
-                  }
-              }
-
-              private void createNotificationChannel() {
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      NotificationChannel serviceChannel = new NotificationChannel(
-                              CHANNEL_ID,
-                              "Tracer GPS Service",
-                              NotificationManager.IMPORTANCE_LOW
-                      );
-                      NotificationManager manager = getSystemService(NotificationManager.class);
-                      if (manager != null) {
-                          manager.createNotificationChannel(serviceChannel);
-                      }
-                  }
-              }
-
-              @Override public void onAccuracyChanged(Sensor sensor, int accuracy) {}
-
-              @Override
-              public void onDestroy() {
-                  super.onDestroy();
-                  stopGpsUpdates();
-                  if (sensorManager != null) {
-                      sensorManager.unregisterListener(this);
-                  }
-              }
-
-              @Override public IBinder onBind(Intent intent) { return null; }
-          }
-          EOF
-
-          # MainActivity.java
-          cat << 'EOF' > android/app/src/main/java/cz/wz/tracer/MainActivity.java
-          package cz.wz.tracer;
-
-          import android.Manifest;
-          import android.content.Intent;
-          import android.content.SharedPreferences;
-          import android.content.pm.PackageManager;
-          import android.os.Build;
-          import android.os.Bundle;
-          import android.webkit.JavascriptInterface;
-          import androidx.core.app.ActivityCompat;
-          import androidx.core.content.ContextCompat;
-          import com.getcapacitor.BridgeActivity;
-
-          public class MainActivity extends BridgeActivity {
-              private static final int PERMISSION_REQUEST_CODE = 123;
-
-              @Override
-              public void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-                  this.bridge.getWebView().addJavascriptInterface(new WebAppInterface(), "AndroidBridge");
-                  checkPermissions();
-              }
-
-              private void checkPermissions() {
-                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-                      ActivityCompat.requestPermissions(this, new String[]{
-                          Manifest.permission.ACCESS_FINE_LOCATION,
-                          Manifest.permission.ACCESS_COARSE_LOCATION,
-                          Manifest.permission.POST_NOTIFICATIONS
-                      }, PERMISSION_REQUEST_CODE);
-                  } else {
-                      autoStartIfEnabled();
-                  }
-              }
-
-              private void autoStartIfEnabled() {
-                  SharedPreferences prefs = getSharedPreferences("TracerPrefs", MODE_PRIVATE);
-                  boolean isRunning = prefs.getBoolean("is_tracking_running", false);
-                  if (isRunning) {
-                      startGpsService();
-                  }
-              }
-
-              public void startGpsService() {
-                  Intent serviceIntent = new Intent(this, GpsService.class);
-                  serviceIntent.setAction(GpsService.ACTION_START);
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      startForegroundService(serviceIntent);
-                  } else {
-                      startService(serviceIntent);
-                  }
-              }
-
-              public void stopGpsService() {
-                  Intent serviceIntent = new Intent(this, GpsService.class);
-                  serviceIntent.setAction(GpsService.ACTION_STOP);
-                  startService(serviceIntent);
-              }
-
-              public class WebAppInterface {
-                  @JavascriptInterface
-                  public void startTracking() {
-                      runOnUiThread(() -> startGpsService());
-                  }
-
-                  @JavascriptInterface
-                  public void stopTracking() {
-                      runOnUiThread(() -> stopGpsService());
-                  }
-              }
-          }
-          EOF
 
       - name: Build Android APK
         run: |
