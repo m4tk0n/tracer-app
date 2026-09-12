@@ -1,115 +1,42 @@
 <!DOCTYPE html>
 <html lang="cs">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Tracer GPS</title>
-  <style>
-    body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #121212; color: white; text-align: center; }
-    .box { background: #1e1e1e; padding: 20px; border-radius: 12px; width: 85%; max-width: 340px; box-sizing: border-box; }
-    h1 { margin-top: 0; font-size: 22px; color: #4caf50; }
-    input[type="email"] { width: 100%; padding: 10px; margin-bottom: 15px; background: #2a2a2a; color: white; border: 1px solid #444; border-radius: 6px; box-sizing: border-box; text-align: center; font-size: 14px; }
-    .status-val { font-weight: bold; margin: 10px 0; font-size: 15px; color: #ffeb3b; }
-    .coords { font-family: monospace; font-size: 12px; color: #aaa; margin-bottom: 15px; }
-    button { border: none; padding: 12px; font-size: 15px; font-weight: bold; border-radius: 6px; margin: 5px 0; width: 100%; cursor: pointer; color: white; }
-    .btn-start { background: #4caf50; }
-    .btn-pause { background: #ff9800; }
-    .btn-stop { background: #f44336; }
-    button:disabled { opacity: 0.3; cursor: not-allowed; }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPS Tracker</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; text-align: center; background: #f4f4f9; }
+        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        select, button { width: 100%; padding: 12px; margin: 8px 0; border-radius: 8px; border: 1px solid #ccc; font-size: 16px; }
+        button.start { background: #28a745; color: white; border: none; font-weight: bold; cursor: pointer; }
+        button.stop { background: #dc3545; color: white; border: none; font-weight: bold; cursor: pointer; }
+        .stats { font-size: 18px; margin-top: 15px; }
+    </style>
 </head>
 <body>
-  <div class="box">
-    <h1>Tracer GPS</h1>
-    <input type="email" id="userEmail" placeholder="Zadej svůj e-mail" />
-    
-    <div id="status" class="status-val">Přípraveno</div>
-    <div id="coords" class="coords">Lat: - | Lng: -</div>
 
-    <button id="btnStart" class="btn-start" onclick="startTracking()">START</button>
-    <button id="btnPause" class="btn-pause" onclick="togglePause()" disabled>PAUZA</button>
-    <button id="btnStop" class="btn-stop" onclick="stopTracking()" disabled>KONEC</button>
-  </div>
+    <h2>GPS Tracker</h2>
 
-  <script>
-    let timer = null;
-    let isPaused = false;
+    <div class="card">
+        <label for="activityType"><strong>Typ aktivity:</strong></label>
+        <select id="activityType">
+            <option value="bike">🚴‍♂️ Kolo</option>
+            <option value="run">🏃‍♂️ Běh</option>
+            <option value="walk">🚶‍♂️ Chůze</option>
+        </select>
 
-    const emailInput = document.getElementById('userEmail');
-    emailInput.value = localStorage.getItem('tracer_email') || '';
-    emailInput.addEventListener('input', (e) => {
-      localStorage.setItem('tracer_email', e.target.value.trim());
-    });
+        <button id="btnStart" class="start" onclick="startTracking()">▶ Spustit aktivitu</button>
+        <button id="btnStop" class="stop" onclick="stopTracking()" style="display:none;">⏹ Ukončit aktivitu</button>
+    </div>
 
-    function setUI(status, startBtn, pauseBtn, stopBtn, pauseTxt = "PAUZA") {
-      document.getElementById('status').innerText = status;
-      document.getElementById('btnStart').disabled = !startBtn;
-      document.getElementById('btnPause').disabled = !pauseBtn;
-      document.getElementById('btnStop').disabled = !stopBtn;
-      document.getElementById('btnPause').innerText = pauseTxt;
-    }
+    <div class="card stats">
+        <p><strong>Stav:</strong> <span id="status">Připraven</span></p>
+        <p><strong>Vzdálenost:</strong> <span id="dist">0</span> km</p>
+        <p><strong>Rychlost:</strong> <span id="speed">0</span> km/h</p>
+    </div>
 
-    function fetchLocation() {
-      if (isPaused) return;
-
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const lat = pos.coords.latitude;
-          const lng = pos.coords.longitude;
-          document.getElementById('coords').innerText = `Lat: ${lat.toFixed(5)} | Lng: ${lng.toFixed(5)}`;
-          
-          const email = localStorage.getItem('tracer_email') || emailInput.value.trim();
-
-          fetch("https://7x.wz.cz/tracer/api_location.php", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              email: email,
-              lat: lat,
-              lng: lng
-            })
-          }).catch(e => console.error("Chyba sítě:", e));
-        },
-        (err) => {
-          document.getElementById('status').innerText = "GPS chyba: " + err.message;
-        },
-        { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
-      );
-    }
-
-    function startTracking() {
-      if (!navigator.geolocation) {
-        alert("GPS není v tomto zařízení podporována.");
-        return;
-      }
-      stopTracking();
-      isPaused = false;
-      setUI("Sledování běží...", false, true, true, "PAUZA");
-      
-      fetchLocation();
-      timer = setInterval(fetchLocation, 4000);
-    }
-
-    function togglePause() {
-      if (isPaused) {
-        isPaused = false;
-        setUI("Sledování běží...", false, true, true, "PAUZA");
-        fetchLocation();
-      } else {
-        isPaused = true;
-        setUI("Pozastaveno", false, true, true, "POKRAČOVAT");
-      }
-    }
-
-    function stopTracking() {
-      if (timer !== null) {
-        clearInterval(timer);
-        timer = null;
-      }
-      isPaused = false;
-      document.getElementById('coords').innerText = "Lat: - | Lng: -";
-      setUI("Zastaveno", true, false, false, "PAUZA");
-    }
-  </script>
+    <!-- Samostatné skripty -->
+    <script src="tracker.js"></script>
+    <script src="app.js"></script>
 </body>
 </html>
