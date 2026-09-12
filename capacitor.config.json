@@ -1,0 +1,9 @@
+{
+  "appId": "cz.wz.tracer",
+  "appName": "Tracer GPS",
+  "webDir": "www",
+  "server": {
+    "url": "https://7x.wz.cz/tracer/app/",
+    "cleartext": true
+  }
+}
