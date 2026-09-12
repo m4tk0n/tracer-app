@@ -88,7 +88,7 @@ jobs:
                       backgroundTitle: "Tracer GPS aktivní",
                       requestPermissions: true,
                       stale: false,
-                      distanceFilter: 2
+                      distanceFilter: 15 // Změněno na 15 metrů pro lepší výdrž baterie
                     },
                     function (location, error) {
                       if (error) {
