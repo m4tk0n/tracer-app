@@ -3,14 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GPS Tracker</title>
+    <title>GPS Tracker v9</title>
     <style>
-        body { font-family: sans-serif; padding: 20px; text-align: center; background: #f4f4f9; }
+        body { font-family: sans-serif; padding: 20px; text-align: center; background: #f4f4f9; color: #333; }
         .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        select, button { width: 100%; padding: 12px; margin: 8px 0; border-radius: 8px; border: 1px solid #ccc; font-size: 16px; }
-        button.start { background: #28a745; color: white; border: none; font-weight: bold; cursor: pointer; }
-        button.stop { background: #dc3545; color: white; border: none; font-weight: bold; cursor: pointer; }
+        select, button { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }
+        button.start { background: #28a745; color: white; font-weight: bold; cursor: pointer; border: none; }
+        button.stop { background: #dc3545; color: white; font-weight: bold; cursor: pointer; border: none; }
         .stats { font-size: 18px; margin-top: 15px; }
+        .version { font-size: 12px; color: #888; margin-top: 30px; }
     </style>
 </head>
 <body>
@@ -18,15 +19,15 @@
     <h2>GPS Tracker</h2>
 
     <div class="card">
-        <label for="activityType"><strong>Typ aktivity:</strong></label>
+        <label for="activityType"><strong>Vyberte aktivitu:</strong></label>
         <select id="activityType">
             <option value="bike">🚴‍♂️ Kolo</option>
             <option value="run">🏃‍♂️ Běh</option>
             <option value="walk">🚶‍♂️ Chůze</option>
         </select>
 
-        <button id="btnStart" class="start" onclick="startTracking()">▶ Spustit aktivitu</button>
-        <button id="btnStop" class="stop" onclick="stopTracking()" style="display:none;">⏹ Ukončit aktivitu</button>
+        <button id="btnStart" class="start" onclick="startTracking()">▶ Spustit sledování</button>
+        <button id="btnStop" class="stop" onclick="stopTracking()" style="display:none;">⏹ Ukončit a uložit</button>
     </div>
 
     <div class="card stats">
@@ -35,7 +36,9 @@
         <p><strong>Rychlost:</strong> <span id="speed">0</span> km/h</p>
     </div>
 
-    <!-- Samostatné skripty -->
+    <div class="version">Aplikace verze v9 (Offline-ready)</div>
+
+    <!-- Samostatné moduly -->
     <script src="tracker.js"></script>
     <script src="app.js"></script>
 </body>
