@@ -1,37 +1,49 @@
-// tracker.js - Samostatný skript pro správu GPS tras a aktivit
+// tracker.js - Samostatná logika pro GPS, offline úložiště a synchronizaci (v9)
 
 class GpsTracer {
     constructor(apiEndpoint = 'https://7x.wz.cz/tracer/api_activity.php') {
         this.apiEndpoint = apiEndpoint;
-        this.currentActivityId = null;
-        this.activityStartTime = null;
-        this.totalDistanceMeters = 0;
+        this.currentActivity = null; // { id, type, startTime, points, distance, isOffline }
         this.lastLat = null;
         this.lastLng = null;
-        this.watchId = null;
         this.isPaused = false;
+
+        // Automatická kontrola a synchronizace při startu, pokud je internet
+        window.addEventListener('online', () => this.syncOfflineData());
     }
 
-    // Výpočet vzdálenosti mezi dvěma body v metrech (Haversine formula)
     _calculateDistance(lat1, lon1, lat2, lon2) {
-        const R = 6371e3; // Poloměr Země v metrech
+        const R = 6371e3;
         const φ1 = lat1 * Math.PI / 180;
         const φ2 = lat2 * Math.PI / 180;
         const Δφ = (lat2 - lat1) * Math.PI / 180;
         const Δλ = (lon2 - lon1) * Math.PI / 180;
-
-        const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-                  Math.cos(φ1) * Math.cos(φ2) *
-                  Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-
-        return R * c;
+        const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+        return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
     }
 
-    // 1. Spuštění nové aktivity (zavolá START na serveru)
+    // Spuštění aktivity (funguje i offline)
     async start(activityType = 'bike') {
-        const email = localStorage.getItem('tracer_email') || '';
+        const email = localStorage.getItem('tracer_email') || 'mobilni_uzivatel';
+        const startTime = new Date().toISOString();
+        
+        // Vytvoříme lokální objekt aktivity
+        this.currentActivity = {
+            localId: 'act_' + Date.now(),
+            serverActivityId: null,
+            email: email,
+            type: activityType,
+            startTime: startTime,
+            points: [],
+            totalDistanceMeters: 0,
+            status: 'active'
+        };
 
+        this.lastLat = null;
+        this.lastLng = null;
+        this.isPaused = false;
+
+        // Pokus o okamžité založení na serveru
         try {
             const response = await fetch(this.apiEndpoint, {
                 method: "POST",
@@ -39,101 +51,161 @@ class GpsTracer {
                 body: JSON.stringify({ action: 'start', email: email, activity_type: activityType })
             });
             const data = await response.json();
-
             if (data.status === 'success') {
-                this.currentActivityId = data.activity_id;
-                this.activityStartTime = new Date();
-                this.totalDistanceMeters = 0;
-                this.lastLat = null;
-                this.lastLng = null;
-                this.isPaused = false;
-                console.log("Aktivita úspěšně odstartována, ID:", this.currentActivityId);
-                return true;
-            } else {
-                console.error("Chyba při startu:", data.message);
-                return false;
+                this.currentActivity.serverActivityId = data.activity_id;
             }
         } catch (err) {
-            console.error("Chyba připojení k serveru:", err);
-            return false;
+            console.warn("Server nedostupný (start offline):", err);
+            this.currentActivity.isOffline = true;
         }
+
+        this._saveToLocalStorage();
+        return true;
     }
 
-    // 2. Zpracování a odeslání bodu (volá se z pluginu / watchPosition)
+    // Zpracování bodu z GPS
     async handlePositionUpdate(lat, lng, speed = 0) {
-        if (!this.currentActivityId || this.isPaused) return;
+        if (!this.currentActivity || this.isPaused) return;
 
-        // Přičtení vzdálenosti, pokud máme předchozí bod
         if (this.lastLat !== null && this.lastLng !== null) {
             const dist = this._calculateDistance(this.lastLat, this.lastLng, lat, lng);
-            this.totalDistanceMeters += dist;
+            this.currentActivity.totalDistanceMeters += dist;
         }
         this.lastLat = lat;
         this.lastLng = lng;
 
-        const email = localStorage.getItem('tracer_email') || '';
+        const pointData = { lat, lng, speed, time: new Date().toISOString() };
+        this.currentActivity.points.push(pointData);
+        this._saveToLocalStorage();
 
-        // Odeslání bodu na server
-        fetch(this.apiEndpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                action: 'point',
-                email: email,
-                activity_id: this.currentActivityId,
-                lat: lat,
-                lng: lng,
-                speed: speed
-            })
-        }).catch(err => console.error("Chyba při odesílání bodu:", err));
+        // Pokus o odeslání bodu na server
+        if (this.currentActivity.serverActivityId) {
+            fetch(this.apiEndpoint, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    action: 'point',
+                    email: this.currentActivity.email,
+                    activity_id: this.currentActivity.serverActivityId,
+                    lat: lat,
+                    lng: lng,
+                    speed: speed
+                })
+            }).catch(() => { /* Ignorujeme výpadek sítě u bodu */ });
+        }
     }
 
-    // Pauza / Pokračování
-    togglePause() {
-        this.isPaused = !this.isPaused;
-        return this.isPaused;
-    }
-
-    // 3. Ukončení aktivity (výpočet statistik a STOP na serveru)
+    // Ukončení aktivity
     async stop() {
-        if (!this.currentActivityId) return null;
+        if (!this.currentActivity) return null;
 
-        const durationSeconds = Math.floor((new Date() - this.activityStartTime) / 1000);
-        const distanceKm = this.totalDistanceMeters / 1000;
+        const endTime = new Date();
+        const durationSeconds = Math.floor((endTime - new Date(this.currentActivity.startTime)) / 1000);
+        const distanceKm = this.currentActivity.totalDistanceMeters / 1000;
         const durationHours = durationSeconds / 3600;
         const avgSpeedKmh = durationHours > 0 ? (distanceKm / durationHours) : 0;
 
-        const email = localStorage.getItem('tracer_email') || '';
         const summary = {
-            distance_meters: Math.round(this.totalDistanceMeters),
+            distance_meters: Math.round(this.currentActivity.totalDistanceMeters),
             duration_seconds: durationSeconds,
             avg_speed_kmh: parseFloat(avgSpeedKmh.toFixed(2))
         };
 
+        this.currentActivity.status = 'finished';
+        this.currentActivity.summary = summary;
+        this._saveToLocalStorage();
+
+        // Pokus o finální odeslání na server
+        let sentSuccessfully = false;
+        if (this.currentActivity.serverActivityId) {
+            sentSuccessfully = await this._sendStopToServer(summary);
+        } else {
+            // Pokud probíhal offline režim od začátku, uložíme do fronty k pozdější synchronizaci
+            this._queueForSync();
+        }
+
+        const resultSummary = { ...summary };
+        this.currentActivity = null;
+        localStorage.removeItem('active_tracer_session');
+        return resultSummary;
+    }
+
+    async _sendStopToServer(summary) {
         try {
             const response = await fetch(this.apiEndpoint, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     action: 'stop',
-                    email: email,
-                    activity_id: this.currentActivityId,
+                    email: this.currentActivity.email,
+                    activity_id: this.currentActivity.serverActivityId,
                     ...summary
                 })
             });
             const data = await response.json();
-
-            if (data.status === 'success') {
-                console.log("Trasa úspěšně uložena.");
-                this.currentActivityId = null;
-                return summary;
-            } else {
-                console.error("Chyba při ukončování:", data.message);
-                return null;
-            }
+            return data.status === 'success';
         } catch (err) {
-            console.error("Chyba připojení při ukončování:", err);
-            return null;
+            this._queueForSync();
+            return false;
         }
+    }
+
+    _saveToLocalStorage() {
+        if (this.currentActivity) {
+            localStorage.setItem('active_tracer_session', JSON.stringify(this.currentActivity));
+        }
+    }
+
+    _queueForSync() {
+        let queue = JSON.parse(localStorage.getItem('tracer_offline_queue') || '[]');
+        queue.push(this.currentActivity);
+        localStorage.setItem('tracer_offline_queue', JSON.stringify(queue));
+    }
+
+    // Synchronizace offline dat, jakmile se objeví internet
+    async syncOfflineData() {
+        let queue = JSON.parse(localStorage.getItem('tracer_offline_queue') || '[]');
+        if (queue.length === 0) return;
+
+        console.log("Probíhá synchronizace offline aktivit se serverem...");
+        let remainingQueue = [];
+
+        for (const act of queue) {
+            try {
+                // 1. Založení na serveru
+                const startRes = await fetch(this.apiEndpoint, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ action: 'start', email: act.email, activity_type: act.type })
+                });
+                const startData = await startRes.json();
+                
+                if (startData.status === 'success') {
+                    const serverId = startData.activity_id;
+
+                    // 2. Odeslání bodů
+                    for (const pt of act.points) {
+                        await fetch(this.apiEndpoint, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ action: 'point', email: act.email, activity_id: serverId, lat: pt.lat, lng: pt.lng, speed: pt.speed })
+                        });
+                    }
+
+                    // 3. Uzavření
+                    await fetch(this.apiEndpoint, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ action: 'stop', email: act.email, activity_id: serverId, ...act.summary })
+                    });
+                } else {
+                    remainingQueue.push(act);
+                }
+            } catch (err) {
+                remainingQueue.push(act);
+            }
+        }
+
+        localStorage.setItem('tracer_offline_queue', JSON.stringify(remainingQueue));
     }
 }
