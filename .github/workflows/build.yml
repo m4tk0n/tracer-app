@@ -27,7 +27,40 @@ jobs:
       - name: Create Web Dir
         run: |
           mkdir -p www
-          echo "<html><body><h1>Tracer Loading...</h1></body></html>" > www/index.html
+          cat << 'EOF' > www/index.html
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Tracer GPS</title>
+            <style>
+              body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #121212; color: white; text-align: center; }
+              button { background: #00e676; color: black; border: none; padding: 15px 30px; font-size: 18px; font-weight: bold; border-radius: 8px; margin-top: 20px; }
+            </style>
+          </head>
+          <body>
+            <h1>Tracer GPS</h1>
+            <p id="status">Aplikace je připravena k používání.</p>
+            <button onclick="startTracking()">SPUSTIT SLEDOVÁNÍ</button>
+
+            <script>
+              function startTracking() {
+                if (navigator.geolocation) {
+                  navigator.geolocation.getCurrentPosition(
+                    function(position) {
+                      document.getElementById('status').innerText = "Sledování aktivní na pozadí.";
+                    },
+                    function(error) {
+                      alert("Povolte prosím přístup k poloze v nastavení telefonu.");
+                    }
+                  );
+                }
+              }
+            </script>
+          </body>
+          </html>
+          EOF
 
       - name: Install Dependencies
         run: npm install
@@ -37,35 +70,42 @@ jobs:
           npx cap add android
           npx cap sync android
 
-      - name: Insert Native Java Background GPS Engine
+      - name: Insert Native Java GPS Engine With Accelerometer and Gyroscope Power Saving
         run: |
-          # 1. Zapsani vsech potrebnych opravneni do AndroidManifest.xml
+          # 1. Zapsání všech potřebných oprávnění
           MANIFEST_PATH="android/app/src/main/AndroidManifest.xml"
-          PERMISSIONS='<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n<uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />\n<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n<uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />\n<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n<uses-permission android:name="android.permission.INTERNET" />'
+          PERMISSIONS='<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n<uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />\n<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n<uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />\n<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n<uses-permission android:name="android.permission.INTERNET" />\n<uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />'
           sed -i "/<manifest/a $PERMISSIONS" $MANIFEST_PATH
 
           SERVICE_TAG='<service android:name="cz.wz.tracer.GpsService" android:foregroundServiceType="location" android:enabled="true" android:exported="false" />'
           sed -i "/<\/application>/i $SERVICE_TAG" $MANIFEST_PATH
 
-          # 2. Vytvoreni slozky pro nativni Java kody
+          # 2. Vytvoření složky pro nativní Java kódy
           mkdir -p android/app/src/main/java/cz/wz/tracer
 
-          # 3. Nativni Java sluzba, ktera bezi na pozadi a sama posila GPS na api_location.php
+          # 3. Nativní Java služba se senzory pohybu
           cat << 'EOF' > android/app/src/main/java/cz/wz/tracer/GpsService.java
           package cz.wz.tracer;
 
           import android.app.Notification;
           import android.app.NotificationChannel;
           import android.app.NotificationManager;
+          import android.app.PendingIntent;
           import android.app.Service;
           import android.content.Context;
           import android.content.Intent;
           import android.content.SharedPreferences;
+          import android.content.pm.ServiceInfo;
+          import android.hardware.Sensor;
+          import android.hardware.SensorEvent;
+          import android.hardware.SensorEventListener;
+          import android.hardware.SensorManager;
           import android.location.Location;
           import android.location.LocationListener;
           import android.location.LocationManager;
           import android.os.Build;
           import android.os.Bundle;
+          import android.os.Handler;
           import android.os.IBinder;
           import androidx.core.app.NotificationCompat;
 
@@ -74,48 +114,162 @@ jobs:
           import java.net.URL;
           import java.nio.charset.StandardCharsets;
 
-          public class GpsService extends Service {
+          public class GpsService extends Service implements SensorEventListener {
               private static final String CHANNEL_ID = "TracerGpsChannel";
+              public static final String ACTION_START  = "cz.wz.tracer.ACTION_START";
+              public static final String ACTION_PAUSE  = "cz.wz.tracer.ACTION_PAUSE";
+              public static final String ACTION_RESUME = "cz.wz.tracer.ACTION_RESUME";
+              public static final String ACTION_STOP   = "cz.wz.tracer.ACTION_STOP";
+
+              private LocationManager locationManager;
+              private LocationListener locationListener;
+              private SensorManager sensorManager;
+              private Sensor accelerometer;
+              private Sensor gyroscope;
+
+              private boolean isPaused = false;
+              private boolean isGpsActive = false;
+
+              private long lastMoveTime = System.currentTimeMillis();
+              private static final long STILL_TIMEOUT_MS = 30000; // 30 sekund bez pohybu = odpojit GPS
+              private Handler timeoutHandler = new Handler();
 
               @Override
-              public void onCreate() {
-                  super.onCreate();
-                  createNotificationChannel();
-                  
-                  Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
-                          .setContentTitle("Tracer GPS Sledování")
-                          .setContentText("Aplikace aktivně odesílá polohu na pozadí")
-                          .setSmallIcon(android.R.drawable.ic_menu_compass)
-                          .setPriority(NotificationCompat.PRIORITY_LOW)
-                          .setOngoing(true)
-                          .build();
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  String action = intent != null ? intent.getAction() : ACTION_START;
 
-                  startForeground(1, notification);
-                  startGpsUpdates();
+                  if (ACTION_STOP.equals(action)) {
+                      stopForeground(true);
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  } else if (ACTION_PAUSE.equals(action)) {
+                      isPaused = true;
+                      stopGpsUpdates();
+                      updateNotification("Sledování pozastaveno (Pauza)", true);
+                      return START_STICKY;
+                  } else if (ACTION_RESUME.equals(action)) {
+                      isPaused = false;
+                      startGpsUpdates();
+                      updateNotification("Aplikace úsporně sledovala polohu na pozadí", false);
+                      return START_STICKY;
+                  }
+
+                  isPaused = false;
+                  createNotificationChannel();
+
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                          startForeground(1, buildNotification("Aplikace úsporně sledovala polohu na pozadí", false), ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
+                      } else {
+                          startForeground(1, buildNotification("Aplikace úsporně sledovala polohu na pozadí", false));
+                      }
+                      initSensors();
+                      startGpsUpdates();
+                      scheduleStillCheck();
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                  }
+
+                  return START_STICKY;
               }
 
-              private void startGpsUpdates() {
-                  LocationManager locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+              private void initSensors() {
+                  sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+                  if (sensorManager != null) {
+                      accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+                      gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
+
+                      if (accelerometer != null) {
+                          sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_NORMAL);
+                      }
+                      if (gyroscope != null) {
+                          sensorManager.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_NORMAL);
+                      }
+                  }
+              }
+
+              @Override
+              public void onSensorChanged(SensorEvent event) {
+                  if (isPaused) return;
+
+                  if (event.sensor.getType() == Sensor.TYPE_ACCELEROMETER) {
+                      float x = event.values[0];
+                      float y = event.values[1];
+                      float z = event.values[2];
+                      double acceleration = Math.sqrt(x * x + y * y + z * z);
+
+                      // Pokud je zrychlení jiné než gravitace (~9.8 m/s^2), telefon se pohybuje
+                      if (Math.abs(acceleration - SensorManager.GRAVITY_EARTH) > 0.8) {
+                          onDeviceMoved();
+                      }
+                  } else if (event.sensor.getType() == Sensor.TYPE_GYROSCOPE) {
+                      float gyroX = Math.abs(event.values[0]);
+                      float gyroY = Math.abs(event.values[1]);
+                      float gyroZ = Math.abs(event.values[2]);
+
+                      // Detekce otáčení telefonu
+                      if (gyroX > 0.2 || gyroY > 0.2 || gyroZ > 0.2) {
+                          onDeviceMoved();
+                      }
+                  }
+              }
+
+              private void onDeviceMoved() {
+                  lastMoveTime = System.currentTimeMillis();
+                  if (!isGpsActive && !isPaused) {
+                      startGpsUpdates();
+                      updateNotification("Aplikace úsporně sledovala polohu na pozadí", false);
+                  }
+              }
+
+              private void scheduleStillCheck() {
+                  timeoutHandler.postDelayed(new Runnable() {
+                      @Override
+                      public void run() {
+                          if (!isPaused && isGpsActive && (System.currentTimeMillis() - lastMoveTime > STILL_TIMEOUT_MS)) {
+                              stopGpsUpdates();
+                              updateNotification("Telefon je v klidu – GPS je dočasně vypnuta", false);
+                          }
+                          timeoutHandler.postDelayed(this, 10000);
+                      }
+                  }, 10000);
+              }
+
+              private synchronized void startGpsUpdates() {
+                  if (isGpsActive) return;
+                  locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+                  locationListener = new LocationListener() {
+                      @Override
+                      public void onLocationChanged(Location location) {
+                          if (!isPaused) {
+                              sendLocationToServer(location.getLatitude(), location.getLongitude());
+                          }
+                      }
+                      @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
+                      @Override public void onProviderEnabled(String provider) {}
+                      @Override public void onProviderDisabled(String provider) {}
+                  };
+
                   try {
                       if (locationManager != null) {
                           locationManager.requestLocationUpdates(
                               LocationManager.GPS_PROVIDER,
-                              5000, // Kazdych 55 sekund
-                              0,     // Metry
-                              new LocationListener() {
-                                  @Override
-                                  public void onLocationChanged(Location location) {
-                                      sendLocationToServer(location.getLatitude(), location.getLongitude());
-                                  }
-                                  @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
-                                  @Override public void onProviderEnabled(String provider) {}
-                                  @Override public void onProviderDisabled(String provider) {}
-                              }
+                              5000,
+                              5,
+                              locationListener
                           );
+                          isGpsActive = true;
                       }
                   } catch (SecurityException e) {
                       e.printStackTrace();
                   }
+              }
+
+              private synchronized void stopGpsUpdates() {
+                  if (locationManager != null && locationListener != null) {
+                      locationManager.removeUpdates(locationListener);
+                  }
+                  isGpsActive = false;
               }
 
               private void sendLocationToServer(final double lat, final double lng) {
@@ -123,14 +277,12 @@ jobs:
                       @Override
                       public void run() {
                           try {
-                              // Nativni HTTP POST na vas server
                               URL url = new URL("https://7x.wz.cz/tracer/api_location.php");
                               HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                               conn.setRequestMethod("POST");
                               conn.setRequestProperty("Content-Type", "application/json; utf-8");
                               conn.setDoOutput(true);
 
-                              // Vezme ulozeny email z nastaveni, pripadne pouzije vychozi
                               SharedPreferences prefs = getSharedPreferences("CapacitorStorage", MODE_PRIVATE);
                               String email = prefs.getString("tracer_email", "");
 
@@ -149,6 +301,38 @@ jobs:
                   }).start();
               }
 
+              private PendingIntent getServicePendingIntent(String action) {
+                  Intent intent = new Intent(this, GpsService.class);
+                  intent.setAction(action);
+                  return PendingIntent.getService(this, action.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+              }
+
+              private Notification buildNotification(String statusText, boolean paused) {
+                  NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
+                          .setContentTitle("Tracer GPS Sledování")
+                          .setContentText(statusText)
+                          .setSmallIcon(android.R.drawable.ic_menu_compass)
+                          .setPriority(NotificationCompat.PRIORITY_LOW)
+                          .setOngoing(true);
+
+                  if (paused) {
+                      builder.addAction(android.R.drawable.ic_media_play, "POKRAČOVAT", getServicePendingIntent(ACTION_RESUME));
+                  } else {
+                      builder.addAction(android.R.drawable.ic_media_pause, "PAUZA", getServicePendingIntent(ACTION_PAUSE));
+                  }
+
+                  builder.addAction(android.R.drawable.ic_delete, "STOP", getServicePendingIntent(ACTION_STOP));
+
+                  return builder.build();
+              }
+
+              private void updateNotification(String statusText, boolean paused) {
+                  NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                  if (manager != null) {
+                      manager.notify(1, buildNotification(statusText, paused));
+                  }
+              }
+
               private void createNotificationChannel() {
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       NotificationChannel serviceChannel = new NotificationChannel(
@@ -164,30 +348,79 @@ jobs:
               }
 
               @Override
+              public void onAccuracyChanged(Sensor sensor, int accuracy) {}
+
+              @Override
+              public void onDestroy() {
+                  super.onDestroy();
+                  stopGpsUpdates();
+                  if (sensorManager != null) {
+                      sensorManager.unregisterListener(this);
+                  }
+                  timeoutHandler.removeCallbacksAndMessages(null);
+              }
+
+              @Override
               public IBinder onBind(Intent intent) {
                   return null;
               }
           }
           EOF
 
-          # 4. Spusteni sluzby ihned po startu aplikace
+          # 4. MainActivity
           cat << 'EOF' > android/app/src/main/java/cz/wz/tracer/MainActivity.java
           package cz.wz.tracer;
 
+          import android.Manifest;
           import android.content.Intent;
+          import android.content.pm.PackageManager;
           import android.os.Build;
           import android.os.Bundle;
+          import androidx.core.app.ActivityCompat;
+          import androidx.core.content.ContextCompat;
           import com.getcapacitor.BridgeActivity;
 
           public class MainActivity extends BridgeActivity {
+              private static final int PERMISSION_REQUEST_CODE = 123;
+
               @Override
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
-                  Intent serviceIntent = new Intent(this, GpsService.class);
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      startForegroundService(serviceIntent);
+                  checkAndStartService();
+              }
+
+              private void checkAndStartService() {
+                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                      ActivityCompat.requestPermissions(this, new String[]{
+                          Manifest.permission.ACCESS_FINE_LOCATION,
+                          Manifest.permission.ACCESS_COARSE_LOCATION
+                      }, PERMISSION_REQUEST_CODE);
                   } else {
-                      startService(serviceIntent);
+                      startGpsService();
+                  }
+              }
+
+              private void startGpsService() {
+                  try {
+                      Intent serviceIntent = new Intent(this, GpsService.class);
+                      serviceIntent.setAction(GpsService.ACTION_START);
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          startForegroundService(serviceIntent);
+                      } else {
+                          startService(serviceIntent);
+                      }
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                  }
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+                  if (requestCode == PERMISSION_REQUEST_CODE) {
+                      if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                          startGpsService();
+                      }
                   }
               }
           }
